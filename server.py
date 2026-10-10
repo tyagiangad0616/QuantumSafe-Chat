@@ -1517,12 +1517,30 @@ def start_server():
         1
     )
 
-    server_socket.bind(
-        (
-            HOST,
-            PORT
+    try:
+        server_socket.bind(
+            (
+                HOST,
+                PORT
+            )
         )
-    )
+    except OSError as error:
+        if error.errno == 48:
+            log(
+                f"[FATAL] Port {PORT} is already in use."
+            )
+            log(
+                "Another server.py is probably still running."
+            )
+            log(
+                f"Free it with: lsof -iTCP:{PORT} -sTCP:LISTEN"
+            )
+            log(
+                "Then kill the PID shown, or close the other terminal."
+            )
+        raise SystemExit(
+            f"Could not bind to {HOST}:{PORT}: {error}"
+        ) from error
 
     server_socket.listen(
         BACKLOG
