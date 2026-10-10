@@ -865,6 +865,43 @@ except ConnectionError:
     )
 
 
+def retry_public_key_requests():
+
+    while (
+        not shutdown_requested.is_set()
+        and not session_ready.is_set()
+    ):
+
+        time.sleep(3)
+
+        if session_ready.is_set():
+            break
+
+        try:
+
+            send_current_packet(
+                create_packet(
+                    "get_public_key",
+                    {
+                        "recipient":
+                        recipient
+                    }
+                )
+            )
+
+        except (
+            ConnectionError,
+            OSError,
+        ):
+            pass
+
+
+threading.Thread(
+    target=retry_public_key_requests,
+    daemon=True,
+).start()
+
+
 # ============================================================
 # CHAT LOOP
 # ============================================================
@@ -1013,13 +1050,25 @@ try:
         # ------------------------------------------------------
 
         if not session_ready.wait(
-            timeout=30
+            timeout=60
         ):
 
             print(
                 "\n[ERROR] "
                 "Secure PQC session was "
                 "not established."
+            )
+
+            print(
+                f"Ensure {recipient} is connected "
+                f"(python client.py or Android app) "
+                f"with recipient set to {username}."
+            )
+
+            print(
+                f"PQC initiator is {initiator}; "
+                f"both peers must be online for "
+                f"ML-KEM handshake."
             )
 
             continue

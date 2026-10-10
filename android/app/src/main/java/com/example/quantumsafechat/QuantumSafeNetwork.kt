@@ -30,12 +30,18 @@ class QuantumSafeNetwork(
     private val listener: Listener
 ) {
     companion object {
-        // Pixel 7 over USB (and emulator) both work with:
-        // adb reverse tcp:5050 tcp:5050
-        // 10.0.2.2 only works on the emulator and fails on a physical device.
-        private const val HOST = "127.0.0.1"
+        // Emulator: 10.0.2.2 = host machine.
+        // Physical device over USB: run `adb reverse tcp:5050 tcp:5050` then use 127.0.0.1.
+        // Physical device on Wi‑Fi: set SERVER_HOST to your PC's LAN IP (same network).
+        private const val SERVER_HOST = "127.0.0.1"
         private const val PORT = 5050
         private const val CONNECT_TIMEOUT = 5000
+
+        private fun initiator(a: String, b: String): String =
+            if (a <= b) a else b
+
+        private fun responder(a: String, b: String): String =
+            if (a <= b) b else a
     }
 
     interface Listener {
@@ -98,7 +104,7 @@ class QuantumSafeNetwork(
 
                 val newSocket = Socket()
                 newSocket.connect(
-                    InetSocketAddress(HOST, PORT),
+                    InetSocketAddress(SERVER_HOST, PORT),
                     CONNECT_TIMEOUT
                 )
 
@@ -134,7 +140,11 @@ class QuantumSafeNetwork(
                 connected.set(false)
                 running.set(false)
                 listener.onConnectionChanged(false)
-                listener.onError("Connection failed: ${e.message}")
+                listener.onError(
+                    "Connection failed: ${e.message}. " +
+                        "Start server.py on your PC. Emulator: server on host. " +
+                        "Physical phone: run adb reverse tcp:5050 tcp:5050 or use PC LAN IP."
+                )
             }
         }.start()
     }
@@ -359,14 +369,26 @@ class QuantumSafeNetwork(
 
         val session = sessions.computeIfAbsent(owner) { Session() }
 
+        val init = initiator(username, owner)
+        val resp = responder(username, owner)
+
+        // Match Python client: only the lexicographic initiator sends key_exchange.
+        if (username != init) {
+            listener.onLog(
+                "Received ML-KEM public key for $owner. " +
+                    "Waiting for $init to complete the handshake…"
+            )
+            return
+        }
+
         try {
             val result = QuantumSafeCrypto.encapsulate(publicKey)
 
             session.sharedSecret = result.sharedSecret
             session.sessionKey = QuantumSafeCrypto.deriveSessionKey(
                 result.sharedSecret,
-                username,
-                owner
+                init,
+                resp
             )
 
             sendPacket(
@@ -403,18 +425,21 @@ class QuantumSafeNetwork(
                 ciphertext
             )
 
+            val init = initiator(username, sender)
+            val resp = responder(username, sender)
+
             val session = sessions.computeIfAbsent(sender) { Session() }
             session.sharedSecret = secret
             session.sessionKey = QuantumSafeCrypto.deriveSessionKey(
                 secret,
-                sender,
-                username
+                init,
+                resp
             )
 
             val confirmation = QuantumSafeCrypto.createConfirmationTag(
                 secret,
-                sender,
-                username
+                init,
+                resp
             )
 
             sendPacket(
@@ -424,11 +449,13 @@ class QuantumSafeNetwork(
                     .put("confirmation", confirmation)
             )
 
-            session.ready = true
-            session.requested = true
-
-            listener.onPeerSecurityChanged(sender, true)
-            listener.onLog("Secure PQC session established with $sender.")
+            // Responder marks ready after sending key_confirm; initiator confirms via key_confirm_ack.
+            if (username == resp) {
+                session.ready = true
+                session.requested = true
+                listener.onPeerSecurityChanged(sender, true)
+                listener.onLog("Secure PQC session established with $sender.")
+            }
         } catch (e: Exception) {
             listener.onError("ML-KEM decapsulation failed for $sender: ${e.message}")
         }
@@ -451,11 +478,14 @@ class QuantumSafeNetwork(
             return
         }
 
+        val init = initiator(username, sender)
+        val resp = responder(username, sender)
+
         try {
             val valid = QuantumSafeCrypto.verifyConfirmationTag(
                 secret,
-                username,
-                sender,
+                init,
+                resp,
                 confirmation
             )
 
