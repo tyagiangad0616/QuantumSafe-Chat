@@ -66,8 +66,8 @@ python client.py            # terminal 2
 ## Internship context
 
 - **Organization:** CyberPeace Foundation — Research Department  
-- **Period:** 8 June 2026 – 8 August 2026 (onsite through 10 July 2026)  
-- **Mentor / reporting:** Mr. Abhishek Sanjeev  
+- **Period:** 8 June 2026 – 8 September 2026 (onsite through 10 July 2026)  
+- **Department:** Research Department  
 
 See `docs/project_plan.md` for early milestones. Add screenshots under `screenshots/` for report annexures.
 
