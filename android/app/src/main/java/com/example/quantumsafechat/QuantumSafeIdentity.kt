@@ -52,6 +52,9 @@ class QuantumSafeIdentityStore(context: Context) {
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_CREATED_AT = "created_at"
         private const val KEY_DARK_MODE = "dark_mode"
+        private const val KEY_SERVER_HOST = "server_host"
+        private const val KEY_SERVER_PORT = "server_port"
+        const val DEFAULT_SERVER_PORT = 5050
 
         // Development-only OTP. Replace only the verification layer later.
         const val DEMO_OTP = "123456"
@@ -125,6 +128,21 @@ class QuantumSafeIdentityStore(context: Context) {
 
     fun setDarkMode(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_DARK_MODE, enabled).apply()
+    }
+
+    fun serverHost(): String = prefs.getString(KEY_SERVER_HOST, "") ?: ""
+
+    fun serverPort(): Int {
+        val port = prefs.getInt(KEY_SERVER_PORT, DEFAULT_SERVER_PORT)
+        return if (port in 1..65535) port else DEFAULT_SERVER_PORT
+    }
+
+    fun setServerEndpoint(host: String, port: Int) {
+        val safePort = if (port in 1..65535) port else DEFAULT_SERVER_PORT
+        prefs.edit()
+            .putString(KEY_SERVER_HOST, host.trim())
+            .putInt(KEY_SERVER_PORT, safePort)
+            .apply()
     }
 }
 

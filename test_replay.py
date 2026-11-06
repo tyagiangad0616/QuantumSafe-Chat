@@ -44,6 +44,7 @@ print("\n1. Processing original message...")
 
 if message_id in processed_message_ids:
     print("✗ Original message incorrectly flagged as replay")
+    raise SystemExit(1)
 else:
     decrypted = decrypt_message(
         session_key,
@@ -66,6 +67,7 @@ if message_id in processed_message_ids:
     print("✓ Replay detected and rejected")
 else:
     print("✗ SECURITY FAILURE: Replay was accepted")
+    raise SystemExit(1)
 
 
 print("\n========================================")

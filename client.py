@@ -1,4 +1,5 @@
 import base64
+import os
 import socket
 import threading
 import time
@@ -25,8 +26,8 @@ from crypto.session import (
 )
 
 
-HOST = "127.0.0.1"
-PORT = 5050
+HOST = os.environ.get("QUANTUMSAFE_HOST", "127.0.0.1")
+PORT = int(os.environ.get("QUANTUMSAFE_PORT", "5050"))
 
 
 # ============================================================
@@ -116,9 +117,9 @@ def close_current_socket(send_leave=True):
 
 
 def send_packet(sock, packet):
-    sock.sendall(
-        encode_packet(packet)
-    )
+    framed = encode_packet(packet)
+    with socket_lock:
+        sock.sendall(framed)
 
 
 def send_current_packet(packet):
@@ -135,6 +136,16 @@ def send_current_packet(packet):
         sock,
         packet
     )
+
+
+def clear_session_material():
+    global shared_secret
+    global session_key
+
+    with session_lock:
+        shared_secret = None
+        session_key = None
+        session_ready.clear()
 
 
 def set_session_material(
@@ -243,6 +254,16 @@ def receive_messages(
                     f"\nConnected as "
                     f"{payload['username']}!"
                 )
+
+            elif packet_type == "peer_offline":
+
+                offline_peer = payload.get("username")
+                if offline_peer == recipient:
+                    clear_session_material()
+                    print(
+                        f"\n{offline_peer} went offline; "
+                        f"session cleared."
+                    )
 
             # ==================================================
             # PUBLIC KEY
@@ -731,10 +752,11 @@ def connect_to_server(
         socket.AF_INET,
         socket.SOCK_STREAM
     )
-
+    new_socket.settimeout(8)
     new_socket.connect(
         (HOST, PORT)
     )
+    new_socket.settimeout(None)
 
     set_socket(
         new_socket

@@ -79,6 +79,7 @@ if decrypted == message:
     print("✓ Valid message decrypted successfully")
 else:
     print("✗ Valid message decryption failed")
+    raise SystemExit(1)
 
 
 print("\n4. Tampering with ciphertext...")
@@ -111,6 +112,7 @@ try:
         "✗ SECURITY FAILURE: "
         "Tampered ciphertext was accepted!"
     )
+    raise SystemExit(1)
 
 except Exception:
 

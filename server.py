@@ -1,8 +1,11 @@
+import os
 import socket
 import threading
+import time
 import traceback
 
 from protocol.packet import (
+    PacketTooLarge,
     create_packet,
     encode_packet,
     receive_packet,
@@ -32,9 +35,14 @@ from protocol.packet import (
 # ============================================================
 
 
-HOST = "0.0.0.0"
-PORT = 5050
+HOST = os.environ.get("QUANTUMSAFE_HOST", "0.0.0.0")
+PORT = int(os.environ.get("QUANTUMSAFE_PORT", "5050"))
 BACKLOG = 50
+MAX_CONNECTIONS = int(os.environ.get("QUANTUMSAFE_MAX_CONNECTIONS", "32"))
+JOIN_TIMEOUT_SECONDS = 20.0
+IDLE_TIMEOUT_SECONDS = 600.0
+MAX_QUEUE_PER_USER = 100
+QUEUE_TTL_SECONDS = 60 * 60
 
 
 # ============================================================
@@ -67,11 +75,19 @@ devices = {}
 # username -> set of users waiting for this user's public key
 pending_public_key_requests = {}
 
-# message_id -> original sender
-message_senders = {}
+# username -> account_id that owns this routing name
+username_bindings = {}
+
+# message_id -> sender, intended recipient, timestamp, delivery state
+message_records = {}
+
+# Delivery ACKs older than this are rejected.
+ACK_TTL_SECONDS = 24 * 60 * 60
 
 state_lock = threading.RLock()
 message_state_lock = threading.RLock()
+socket_write_locks = {}
+active_client_count = 0
 
 shutdown_event = threading.Event()
 
@@ -98,10 +114,24 @@ def is_online(username):
         return username in connected_clients
 
 
+def write_lock_for(sock):
+    with state_lock:
+        lock = socket_write_locks.get(sock)
+        if lock is None:
+            lock = threading.Lock()
+            socket_write_locks[sock] = lock
+        return lock
+
+
+def discard_write_lock(sock):
+    with state_lock:
+        socket_write_locks.pop(sock, None)
+
+
 def send_packet(sock, packet):
-    sock.sendall(
-        encode_packet(packet)
-    )
+    framed = encode_packet(packet)
+    with write_lock_for(sock):
+        sock.sendall(framed)
 
 
 def safe_send(sock, packet):
@@ -134,15 +164,40 @@ def send_error(sock, message):
 # OFFLINE QUEUE
 # ============================================================
 
+def _prune_queue(queue):
+    now = time.time()
+    kept = []
+    for item in queue:
+        if not isinstance(item, dict) or "packet" not in item:
+            kept.append({
+                "queued_at": now,
+                "packet": item
+            })
+            continue
+        if now - item.get("queued_at", now) <= QUEUE_TTL_SECONDS:
+            kept.append(item)
+    return kept
+
+
 def queue_packet(username, packet):
     with state_lock:
 
-        queue = offline_queues.setdefault(
-            username,
-            []
+        queue = _prune_queue(
+            offline_queues.setdefault(
+                username,
+                []
+            )
         )
 
-        queue.append(packet)
+        if len(queue) >= MAX_QUEUE_PER_USER:
+            queue = queue[-(MAX_QUEUE_PER_USER - 1):]
+
+        queue.append({
+            "queued_at": time.time(),
+            "packet": packet
+        })
+
+        offline_queues[username] = queue
 
         return len(queue)
 
@@ -150,14 +205,19 @@ def queue_packet(username, packet):
 def pop_offline_queue(username):
     with state_lock:
 
-        queued = offline_queues.get(
-            username,
-            []
+        queued = _prune_queue(
+            offline_queues.get(
+                username,
+                []
+            )
         )
 
         offline_queues[username] = []
 
-        return queued
+        return [
+            item["packet"]
+            for item in queued
+        ]
 
 
 def deliver_offline_queue(username, sock):
@@ -353,10 +413,9 @@ def register_client(
             username
         ] = public_key
 
-        offline_queues.setdefault(
-            username,
-            []
-        )
+        # A new ML-KEM public key invalidates ciphertext
+        # queued against a previous session.
+        offline_queues[username] = []
 
     if (
         old_socket is not None
@@ -408,6 +467,11 @@ def unregister_client(
                 None
             )
 
+            public_keys.pop(
+                username,
+                None
+            )
+
             stale_device_ids = [
                 device_id
                 for device_id, info in devices.items()
@@ -417,34 +481,87 @@ def unregister_client(
             for device_id in stale_device_ids:
                 devices.pop(device_id, None)
 
+            went_offline = True
+        else:
+            went_offline = False
+
+    discard_write_lock(sock)
+
     log(
         f"[OFFLINE] {username}"
     )
+
+    if went_offline:
+        notify_peer_offline(username)
+
+
+def notify_peer_offline(username):
+    packet = create_packet(
+        "peer_offline",
+        {
+            "username": username
+        }
+    )
+
+    with state_lock:
+        others = list(
+            connected_clients.items()
+        )
+
+    for other_name, other_sock in others:
+        if other_name == username:
+            continue
+        safe_send(other_sock, packet)
 
 
 # ============================================================
 # MESSAGE STATE
 # ============================================================
 
-def remember_message_sender(
+def remember_message(
     message_id,
-    sender
+    sender,
+    recipient
 ):
     with message_state_lock:
+        message_records[message_id] = {
+            "sender": sender,
+            "recipient": recipient,
+            "created_at": time.time(),
+            "delivered": False,
+        }
 
-        message_senders[
-            message_id
-        ] = sender
 
-
-def get_message_sender(
-    message_id
+def accept_delivery_ack(
+    message_id,
+    claimant
 ):
-    with message_state_lock:
+    """
+    Bind a delivery ACK to the intended recipient.
 
-        return message_senders.get(
-            message_id
-        )
+    Returns (accepted, record_copy, reason).
+    reason is one of: accepted, unknown, unauthorized,
+    expired, duplicate.
+    """
+    now = time.time()
+
+    with message_state_lock:
+        record = message_records.get(message_id)
+
+        if record is None:
+            return False, None, "unknown"
+
+        if claimant != record["recipient"]:
+            return False, dict(record), "unauthorized"
+
+        if now - record["created_at"] > ACK_TTL_SECONDS:
+            return False, dict(record), "expired"
+
+        if record["delivered"]:
+            return False, dict(record), "duplicate"
+
+        record["delivered"] = True
+        return True, dict(record), "accepted"
 
 
 # ============================================================
@@ -514,6 +631,19 @@ def handle_join(
         )
 
         return None
+
+    with state_lock:
+        bound_account = username_bindings.get(username)
+
+        if bound_account:
+            if not account_id or bound_account != account_id:
+                send_error(
+                    sock,
+                    "Username is bound to another account."
+                )
+                return None
+        elif account_id:
+            username_bindings[username] = account_id
 
     if account_id and device_id:
         with state_lock:
@@ -970,11 +1100,12 @@ def handle_chat(
 
         return
 
-    # Remember the sender so that the recipient's
-    # delivery_ack can be routed back correctly.
-    remember_message_sender(
+    # Bind this ciphertext to sender AND intended recipient
+    # so a third party cannot forge a delivery ACK.
+    remember_message(
         message_id,
-        sender
+        sender,
+        recipient
     )
 
     short_id = message_id[:8]
@@ -1066,21 +1197,28 @@ def handle_delivery_ack(
 
         return
 
-    original_sender = get_message_sender(
-        message_id
+    accepted, record, reason = accept_delivery_ack(
+        message_id,
+        recipient_user
     )
 
     short_id = message_id[:8]
 
-    if original_sender is None:
-
+    if not accepted:
         log(
-            f"[DELIVERY ACK] "
-            f"Unknown message [{short_id}] "
+            f"[DELIVERY ACK REJECTED] "
+            f"{reason} [{short_id}] "
             f"from {recipient_user}"
         )
 
+        send_error(
+            sock,
+            "Delivery acknowledgement rejected."
+        )
+
         return
+
+    original_sender = record["sender"]
 
     packet = create_packet(
         "delivery_ack",
@@ -1327,6 +1465,8 @@ def handle_client(
     sock,
     address
 ):
+    global active_client_count
+
     username = None
 
     log("")
@@ -1336,6 +1476,12 @@ def handle_client(
     )
 
     try:
+        sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_KEEPALIVE,
+            1
+        )
+        sock.settimeout(JOIN_TIMEOUT_SECONDS)
 
         while not shutdown_event.is_set():
 
@@ -1345,6 +1491,9 @@ def handle_client(
 
             if packet is None:
                 break
+
+            if username is None:
+                sock.settimeout(IDLE_TIMEOUT_SECONDS)
 
             packet_type = packet.get(
                 "type",
@@ -1363,12 +1512,27 @@ def handle_client(
                 packet
             )
 
+    except PacketTooLarge as error:
+
+        log(
+            f"[REJECT] "
+            f"{username or address}: {error}"
+        )
+
+    except socket.timeout:
+
+        log(
+            f"[TIMEOUT] "
+            f"{username or address}"
+        )
+
     except (
         BrokenPipeError,
         ConnectionResetError,
         ConnectionAbortedError,
         EOFError,
         OSError,
+        ValueError,
     ) as error:
 
         log(
@@ -1388,11 +1552,15 @@ def handle_client(
         traceback.print_exc()
 
     finally:
-
         unregister_client(
             username,
             sock
         )
+        discard_write_lock(sock)
+
+        with state_lock:
+            if active_client_count > 0:
+                active_client_count -= 1
 
         try:
             sock.shutdown(
@@ -1473,6 +1641,7 @@ def print_server_status():
 # ============================================================
 
 def start_server():
+    global active_client_count
 
     log("")
     log(
@@ -1574,6 +1743,20 @@ def start_server():
                     break
 
                 raise
+
+            with state_lock:
+                if active_client_count >= MAX_CONNECTIONS:
+                    log(
+                        f"[REJECT] Connection cap "
+                        f"{MAX_CONNECTIONS} reached; "
+                        f"closing {address}"
+                    )
+                    try:
+                        client_socket.close()
+                    except OSError:
+                        pass
+                    continue
+                active_client_count += 1
 
             thread = threading.Thread(
                 target=handle_client,

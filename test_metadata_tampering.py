@@ -82,6 +82,7 @@ except Exception as error:
     print(
         f"✗ Original message failed: {error}"
     )
+    raise SystemExit(1)
 
 
 # ============================================================
@@ -105,6 +106,7 @@ try:
         "✗ SECURITY FAILURE: "
         "Modified sender was accepted!"
     )
+    raise SystemExit(1)
 
 except Exception:
 
@@ -134,6 +136,7 @@ try:
         "✗ SECURITY FAILURE: "
         "Modified recipient was accepted!"
     )
+    raise SystemExit(1)
 
 except Exception:
 
@@ -163,6 +166,7 @@ try:
         "✗ SECURITY FAILURE: "
         "Modified message ID was accepted!"
     )
+    raise SystemExit(1)
 
 except Exception:
 

@@ -263,8 +263,11 @@ private fun QuantumSafeMainApp(
     onDarkModeChange: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
+    val identityStore = remember { QuantumSafeIdentityStore(context) }
     val prefs = remember { context.getSharedPreferences("quantumsafe_chat_state_" + currentAccount.accountId, android.content.Context.MODE_PRIVATE) }
     val database = remember { QuantumSafeDatabase(context.applicationContext) }
+    var serverHost by remember { mutableStateOf(identityStore.serverHost()) }
+    var serverPort by remember { mutableStateOf(identityStore.serverPort()) }
 
     val selectedChatState = remember { mutableStateOf<Chat?>(null) }
     var selectedChat by selectedChatState
@@ -366,15 +369,17 @@ private fun QuantumSafeMainApp(
 
     // One transport connection per account. Do not recreate it when the
     // open chat changes — that used to drop every other PQC session.
-    val network = remember(currentAccount.accountId) {
+    val network = remember(currentAccount.accountId, serverHost, serverPort) {
         QuantumSafeNetwork(
-            username = currentAccount.displayName,
+            username = currentAccount.displayName.trim().ifBlank { currentAccount.accountId },
             accountId = currentAccount.accountId,
             deviceId = currentAccount.deviceId,
             phoneNumber = currentAccount.phoneNumber,
             displayName = currentAccount.displayName,
-            recipient = "Shriyaa",
+            recipient = "",
             knownRecipients = contacts.map { it.name },
+            preferredHost = serverHost,
+            preferredPort = serverPort,
             listener = object : QuantumSafeNetwork.Listener {
                 override fun onConnectionChanged(connected: Boolean) {
                     handler.post {
@@ -579,7 +584,14 @@ private fun QuantumSafeMainApp(
                 persist()
             },
             onProfile = { profileChat = it },
-            onNewChat = { showNewChat = true }
+            onNewChat = { showNewChat = true },
+            serverHost = serverHost,
+            serverPort = serverPort,
+            onServerEndpointChange = { host, port ->
+                identityStore.setServerEndpoint(host, port)
+                serverHost = host.trim()
+                serverPort = port
+            }
         )
     }
 
@@ -759,7 +771,10 @@ fun HomeScreen(
     archivedChats: SnapshotStateList<String>,
     onChatSelected: (Chat) -> Unit,
     onProfile: (Chat) -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    serverHost: String,
+    serverPort: Int,
+    onServerEndpointChange: (String, Int) -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
     var searchText by remember { mutableStateOf("") }
@@ -879,7 +894,10 @@ fun HomeScreen(
                 else -> SettingsScreen(
                     currentAccount = currentAccount,
                     darkMode = darkMode,
-                    onDarkModeChange = onDarkModeChange
+                    onDarkModeChange = onDarkModeChange,
+                    serverHost = serverHost,
+                    serverPort = serverPort,
+                    onServerEndpointChange = onServerEndpointChange
                 )
             }
         }
@@ -1490,11 +1508,16 @@ fun NewChatDialog(onSelect: (Chat) -> Unit, onDismiss: () -> Unit) {
 fun SettingsScreen(
     currentAccount: QuantumSafeAccount,
     darkMode: Boolean,
-    onDarkModeChange: (Boolean) -> Unit
+    onDarkModeChange: (Boolean) -> Unit,
+    serverHost: String,
+    serverPort: Int,
+    onServerEndpointChange: (String, Int) -> Unit
 ) {
     var notifications by remember { mutableStateOf(true) }
     var readReceipts by remember { mutableStateOf(true) }
     var securityDetails by remember { mutableStateOf(false) }
+    var hostDraft by remember { mutableStateOf(serverHost) }
+    var portDraft by remember { mutableStateOf(serverPort.toString()) }
 
     Column(
         Modifier
@@ -1512,6 +1535,46 @@ fun SettingsScreen(
                 ToggleRow(R.drawable.ic_notifications, "Notifications", "Chat notification preference", notifications) { notifications = it }
                 ToggleRow(R.drawable.ic_done_all, "Read receipts", "Show message delivery state", readReceipts) { readReceipts = it }
                 ToggleRow(R.drawable.ic_lock, "Show security details", "Display cryptographic session details", securityDetails) { securityDetails = it }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Surface(shape = RoundedCornerShape(18.dp), color = White) {
+            Column(Modifier.fillMaxWidth().padding(15.dp)) {
+                Text("Relay server", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Optional LAN IP for a physical phone. Emulator still tries 10.0.2.2 then 127.0.0.1.",
+                    color = TextSecondary,
+                    fontSize = 9.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                TextField(
+                    value = hostDraft,
+                    onValueChange = { hostDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Host") },
+                    placeholder = { Text("10.0.2.2 or 192.168.x.x") },
+                    singleLine = true
+                )
+                Spacer(Modifier.height(8.dp))
+                TextField(
+                    value = portDraft,
+                    onValueChange = { portDraft = it.filter { ch -> ch.isDigit() }.take(5) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Port") },
+                    singleLine = true
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(
+                    onClick = {
+                        val port = portDraft.toIntOrNull() ?: QuantumSafeIdentityStore.DEFAULT_SERVER_PORT
+                        onServerEndpointChange(hostDraft, port)
+                    }
+                ) {
+                    Text("Apply and reconnect")
+                }
             }
         }
 
@@ -1543,9 +1606,9 @@ fun SettingsScreen(
                     fontSize = 9.sp
                 )
                 Spacer(Modifier.height(10.dp))
-                SettingsRow(R.drawable.ic_shield, "Privacy", "Messages stay encrypted on this device")
-                SettingsRow(R.drawable.ic_security, "Security", "ML-KEM-768 + AES-256-GCM")
-                SettingsRow(R.drawable.ic_cloud, "Data", "Local conversation state")
+                SettingsRow(R.drawable.ic_shield, "Privacy", "Chat ciphertext uses AES-256-GCM in transit")
+                SettingsRow(R.drawable.ic_security, "Security", "ML-KEM-768 + AES-256-GCM (prototype)")
+                SettingsRow(R.drawable.ic_cloud, "Data", "SQLite on-device is plaintext; Android backup is off")
             }
         }
 
@@ -1555,11 +1618,15 @@ fun SettingsScreen(
             Column(Modifier.fillMaxWidth().padding(15.dp)) {
                 Text("SECURITY STATUS", color = Navy, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("Post-quantum secure architecture", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text("Prototype post-quantum transport", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(3.dp))
                 Text("ML-KEM-768 → HKDF-SHA256 → AES-256-GCM", color = CyberPeaceBlue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(3.dp))
-                Text("Replay protection and authenticated metadata are enforced by the existing protocol.", color = TextSecondary, fontSize = 9.sp)
+                Text(
+                    "Messages are encrypted in transit. The local SQLite history is not encrypted. Demo OTP 123456 is not real SMS authentication. This is not a production messenger.",
+                    color = TextSecondary,
+                    fontSize = 9.sp
+                )
             }
         }
     }

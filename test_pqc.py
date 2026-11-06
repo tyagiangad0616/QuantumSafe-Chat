@@ -17,4 +17,5 @@ if shared_secret_a == shared_secret_b:
     print("SUCCESS: ML-KEM-768 key exchange works!")
 else:
     print("FAILED: Shared secrets do not match!")
+    raise SystemExit(1)
     

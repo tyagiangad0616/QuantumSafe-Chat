@@ -1,30 +1,21 @@
-# Android client — QuantumSafe Chat
+# Android client
 
-## Location
+Project folder: `android/` (package `com.example.quantumsafechat`).
 
-Android Studio project: **`android/`** (package `com.example.quantumsafechat`).
+The Android app talks to the same Python relay as `client.py`. Payloads on the wire are encrypted; the relay forwards ciphertext.
 
-## What to highlight on GitHub / in your internship report
-
-1. **Open the `android/` folder** in this repo — shows the full Compose UI and networking code, not just the Python backend.
-2. **Screenshots** — add PNGs under `screenshots/android/` (chat list, active chat with ticks, secure-session indicator, settings). Reference them in the main `README.md`.
-3. **Interoperability** — note in the report that Android and Python clients exchange **encrypted** traffic through the relay server; server logs should show forwarded ciphertext only.
-4. **Honest scope** — describe as a **prototype**: SQLite on device, demo account verification, in-memory/ephemeral server queues per progress notes.
-
-## Key source files
+## Sources
 
 | File | Role |
 |------|------|
-| `app/src/main/java/.../MainActivity.kt` | Compose UI, navigation, chat list, messaging |
-| `QuantumSafeNetwork.kt` | Socket protocol / server communication |
-| `QuantumSafeCrypto.kt` | PQC + symmetric crypto integration on Android |
-| `QuantumSafeIdentity.kt` | Account / device identity helpers |
+| `MainActivity.kt` | UI, chat list, settings |
+| `QuantumSafeNetwork.kt` | TCP protocol |
+| `QuantumSafeCrypto.kt` | ML-KEM-768 and AES-GCM |
+| `QuantumSafeIdentity.kt` | Account / device helpers and demo OTP |
 
-## Building
+## Notes
 
-- **minSdk / targetSdk:** see `android/app/build.gradle.kts`
-- Do **not** commit `local.properties` (machine-specific SDK path)
-
-## Related material
-
-- Account-foundation experiments may also exist locally as `QuantumSafe_STEP1_ACCOUNT_FOUNDATION` (merge into `android/` when ready).
+- Phone verification in this build is a fixed demo code (`123456`), not SMS.
+- SQLite on the device is not encrypted.
+- Do not commit `local.properties`.
+- Use JDK 21 in Android Studio. Do not put a machine-specific `org.gradle.java.home` in the shared `gradle.properties`.

@@ -1,0 +1,12 @@
+# Python relay, test client, and protocol tests.
+# ML-KEM tests and the interactive client also need liboqs.
+#
+# 1. Install liboqs: https://github.com/open-quantum-safe/liboqs
+# 2. Install the Python bindings:
+#      pip install -r requirements.txt
+#
+# Protocol tests that only import server.py / packet.py do not need oqs.
+# AES-GCM session tests need cryptography. ML-KEM needs liboqs-python.
+
+cryptography>=42.0.0
+liboqs-python>=0.10.0

@@ -10,14 +10,14 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * One persistent transport connection for the Android user with a
  * separate PQC session for every contact.
  *
- * This is the key fix for WhatsApp-like multi-contact behavior:
- * opening Shriyaa's chat no longer disconnects Rahul's secure session.
+ * Opening one contact's chat does not drop another contact's session.
  */
 class QuantumSafeNetwork(
     private val username: String,
@@ -27,15 +27,18 @@ class QuantumSafeNetwork(
     private val displayName: String = username,
     private val recipient: String,
     private val knownRecipients: List<String> = emptyList(),
+    private val preferredHost: String = "",
+    private val preferredPort: Int = 5050,
     private val listener: Listener
 ) {
     companion object {
-        // Emulator: 10.0.2.2 = host machine.
-        // Physical device over USB: run `adb reverse tcp:5050 tcp:5050` then use 127.0.0.1.
-        // Physical device on Wi‑Fi: set SERVER_HOST to your PC's LAN IP (same network).
-        private const val SERVER_HOST = "127.0.0.1"
-        private const val PORT = 5050
-        private const val CONNECT_TIMEOUT = 5000
+        // Emulator loopback 127.0.0.1 is the emulator itself, not the Mac.
+        // 10.0.2.2 is the host machine from the Android emulator.
+        // 127.0.0.1 works on a physical device only after: adb reverse tcp:5050 tcp:5050
+        private val DEFAULT_HOSTS = listOf("10.0.2.2", "127.0.0.1")
+        private const val CONNECT_TIMEOUT = 4000
+        private const val MAX_PACKET_BYTES = 1_048_576
+        private const val MAX_PENDING = 50
 
         private fun initiator(a: String, b: String): String =
             if (a <= b) a else b
@@ -89,6 +92,8 @@ class QuantumSafeNetwork(
     private val processedMessageLock = Any()
 
     private val sendLock = Any()
+    private val pendingOutgoing = ConcurrentHashMap<String, ConcurrentLinkedQueue<String>>()
+    private val pendingIncoming = ConcurrentHashMap<String, ConcurrentLinkedQueue<JSONObject>>()
 
     fun connect() {
         if (connected.get()) {
@@ -102,11 +107,12 @@ class QuantumSafeNetwork(
                 kemKeyPair = QuantumSafeCrypto.generateKeyPair()
                 listener.onLog("ML-KEM-768 key pair generated.")
 
-                val newSocket = Socket()
-                newSocket.connect(
-                    InetSocketAddress(SERVER_HOST, PORT),
-                    CONNECT_TIMEOUT
-                )
+                val hosts = serverHosts()
+                val newSocket = connectToServer()
+                    ?: throw java.net.ConnectException(
+                        "Could not reach server.py on port $preferredPort " +
+                            "(tried ${hosts.joinToString()})"
+                    )
 
                 socket = newSocket
                 input = DataInputStream(
@@ -147,6 +153,28 @@ class QuantumSafeNetwork(
                 )
             }
         }.start()
+    }
+
+    private fun serverHosts(): List<String> {
+        return (listOf(preferredHost.trim()) + DEFAULT_HOSTS)
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+
+    private fun connectToServer(): Socket? {
+        val port = if (preferredPort in 1..65535) preferredPort else 5050
+        for (host in serverHosts()) {
+            try {
+                val candidate = Socket()
+                candidate.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT)
+                candidate.soTimeout = 0
+                listener.onLog("TCP connected to $host:$port")
+                return candidate
+            } catch (e: Exception) {
+                listener.onLog("Connect $host:$port failed: ${e.message}")
+            }
+        }
+        return null
     }
 
     fun disconnect() {
@@ -229,8 +257,9 @@ class QuantumSafeNetwork(
 
             val session = sessions[peer]
             if (session?.ready != true || session.sessionKey == null) {
+                enqueueOutgoing(peer, message)
                 prepareRecipient(peer)
-                listener.onError("Secure session for $peer is not ready yet.")
+                listener.onLog("Queued message for $peer until the PQC session is ready.")
                 return@Thread
             }
 
@@ -314,11 +343,16 @@ class QuantumSafeNetwork(
                 val sender = payload.optString("sender")
                 if (sender.isNotBlank() && sender != username) {
                     val session = sessions.computeIfAbsent(sender) { Session() }
-                    session.ready = true
-                    session.requested = true
+                    markSessionReady(sender, session, "Secure PQC session established with $sender.")
+                }
+            }
 
-                    listener.onPeerSecurityChanged(sender, true)
-                    listener.onLog("Secure PQC session established with $sender.")
+            "peer_offline" -> {
+                val peer = payload.optString("username")
+                if (peer.isNotBlank() && peer != username) {
+                    sessions.remove(peer)
+                    listener.onPeerSecurityChanged(peer, false)
+                    listener.onLog("$peer went offline; session cleared.")
                 }
             }
 
@@ -451,10 +485,7 @@ class QuantumSafeNetwork(
 
             // Responder marks ready after sending key_confirm; initiator confirms via key_confirm_ack.
             if (username == resp) {
-                session.ready = true
-                session.requested = true
-                listener.onPeerSecurityChanged(sender, true)
-                listener.onLog("Secure PQC session established with $sender.")
+                markSessionReady(sender, session, "Secure PQC session established with $sender.")
             }
         } catch (e: Exception) {
             listener.onError("ML-KEM decapsulation failed for $sender: ${e.message}")
@@ -501,9 +532,7 @@ class QuantumSafeNetwork(
                 JSONObject().put("recipient", sender)
             )
 
-            session.ready = true
-            listener.onPeerSecurityChanged(sender, true)
-            listener.onLog("Secure PQC session confirmed with $sender.")
+            markSessionReady(sender, session, "Secure PQC session confirmed with $sender.")
         } catch (e: Exception) {
             listener.onError("Confirmation verification failed: ${e.message}")
         }
@@ -536,7 +565,9 @@ class QuantumSafeNetwork(
         val key = session?.sessionKey
 
         if (key == null || session.ready != true) {
-            listener.onError("No secure session available for $sender.")
+            enqueueIncoming(sender, payload)
+            prepareRecipient(sender)
+            listener.onLog("Queued incoming ciphertext from $sender until the session is ready.")
             return
         }
 
@@ -572,6 +603,9 @@ class QuantumSafeNetwork(
             .put("payload", payload)
 
         val bytes = packet.toString().toByteArray(Charsets.UTF_8)
+        if (bytes.size > MAX_PACKET_BYTES) {
+            throw IllegalStateException("Packet exceeds $MAX_PACKET_BYTES bytes")
+        }
         val currentOutput = output
             ?: throw IllegalStateException("Socket output is unavailable.")
 
@@ -582,13 +616,48 @@ class QuantumSafeNetwork(
         }
     }
 
+    private fun markSessionReady(peer: String, session: Session, logMessage: String) {
+        session.ready = true
+        session.requested = true
+        listener.onPeerSecurityChanged(peer, true)
+        listener.onLog(logMessage)
+        flushPendingOutgoing(peer)
+        flushPendingIncoming(peer)
+    }
+
+    private fun enqueueOutgoing(peer: String, message: String) {
+        val queue = pendingOutgoing.computeIfAbsent(peer) { ConcurrentLinkedQueue() }
+        while (queue.size >= MAX_PENDING) {
+            queue.poll()
+        }
+        queue.add(message)
+    }
+
+    private fun enqueueIncoming(peer: String, payload: JSONObject) {
+        val queue = pendingIncoming.computeIfAbsent(peer) { ConcurrentLinkedQueue() }
+        while (queue.size >= MAX_PENDING) {
+            queue.poll()
+        }
+        queue.add(payload)
+    }
+
+    private fun flushPendingOutgoing(peer: String) {
+        val queued = pendingOutgoing.remove(peer) ?: return
+        queued.forEach { sendMessageTo(peer, it) }
+    }
+
+    private fun flushPendingIncoming(peer: String) {
+        val queued = pendingIncoming.remove(peer) ?: return
+        queued.forEach { handleIncomingChat(it) }
+    }
+
     private fun readPacket(): JSONObject? {
         val currentInput = input ?: return null
 
         return try {
             val length = currentInput.readInt()
 
-            if (length <= 0) {
+            if (length <= 0 || length > MAX_PACKET_BYTES) {
                 throw IllegalStateException("Invalid packet length: $length")
             }
 

@@ -1,78 +1,72 @@
 # QuantumSafe Chat
 
-Post-quantum secure messaging prototype developed during a CyberPeace Foundation internship (Research Department). Combines a **Python relay server + test client** with an **Android (Kotlin / Jetpack Compose)** client.
+A small prototype of encrypted chat over a local TCP relay. It uses ML-KEM-768 for key establishment and AES-256-GCM for message payloads. This is a learning build, not a production messenger.
 
-**Stack:** ML-KEM-768 · HKDF-SHA256 · AES-256-GCM · HMAC-SHA256 · TCP port **5050**
+Assigned work during an internship at CyberPeace Foundation (Research Department).
 
-> **Status:** Working **prototype** for learning and demonstration — not production-hardened messaging.
+**Relay:** Python (`server.py`) on port 5050  
+**Peers:** Python `client.py` and an Android app in `android/`
 
 ---
 
-## Repository layout
+## Layout
 
 | Path | Description |
 |------|-------------|
-| `server.py`, `client.py` | Relay server and Python peer client |
-| `pqc.py`, `crypto/` | ML-KEM-768 and session crypto helpers |
-| `protocol/` | QSP packet encoding/decoding and acknowledgements |
-| `test_*.py` | Protocol, PQC, replay, wrong-key, and tampering tests |
-| `docs/` | Project plan and documentation |
-| `screenshots/` | Evidence placeholders (add session/UI captures here) |
-| `android/` | **Android Studio project** — Jetpack Compose UI, SQLite, multi-contact chat |
+| `server.py`, `client.py` | Relay and a terminal peer |
+| `pqc.py`, `crypto/` | ML-KEM helpers and session crypto |
+| `protocol/` | Length-prefixed JSON packets |
+| `test_*.py` | Protocol and crypto checks |
+| `docs/` | Notes and an early plan |
+| `screenshots/` | Optional captures |
+| `android/` | Kotlin / Compose client |
 
 ---
 
-## Features (current)
+## What it does
 
-### Python backend / protocol
+- Encrypted chat between two peers through a relay that does not decrypt payloads
+- Per-contact sessions on Android
+- Delivery acknowledgements bound to the intended recipient
+- Account ids derived from a phone number, with a **demo OTP** (`123456`) so the flow can be shown without SMS
+- Local SQLite history on Android (plaintext; Android backup is off)
 
-- TCP client–server chat on `127.0.0.1:5050`
-- Bidirectional messaging, threading, join/username flow
-- QSP messaging with delivery acknowledgements
-- ML-KEM-768 key establishment integrated into chat protocol
-- Security-oriented tests (replay, wrong key, metadata tampering)
-
-### Android client (`android/`)
-
-- Kotlin + **Jetpack Compose** WhatsApp-style UI
-- Encrypted messaging interoperable with the Python client
-- Chat list, contacts, search, message bubbles, delivery ticks
-- **SQLite** persistence across app restarts
-- Multi-contact / per-peer sessions
-- Account/device identity foundation (demo verification flow)
+Limitations that are intentional for this prototype: no real SMS, no encrypted local database, no Play Store packaging.
 
 ---
 
-## Quick start (local)
+## Run locally
 
-### Python (requires [liboqs](https://github.com/open-quantum-safe/liboqs) / `oqs` Python bindings)
+Python peers need [liboqs](https://github.com/open-quantum-safe/liboqs) / `liboqs-python`. The relay itself does not import `oqs`.
 
 ```bash
 cd QuantumSafe-Chat
 python3 -m venv venv && source venv/bin/activate
-pip install liboqs-python   # or your environment’s oqs package
+pip install -r requirements.txt
 python server.py            # terminal 1
 python client.py            # terminal 2
 ```
 
+Optional environment variables: `QUANTUMSAFE_HOST`, `QUANTUMSAFE_PORT`, `QUANTUMSAFE_MAX_CONNECTIONS`.
+
+Checks that do not need liboqs:
+
+```bash
+python3 test_packet_limits.py
+python3 test_concurrent_send.py
+python3 test_stale_public_key.py
+python3 test_offline_queue.py
+python3 test_identity_binding.py
+python3 test_delivery_ack.py
+python3 test_protocol.py
+```
+
 ### Android
 
-1. Open **`android/`** in Android Studio.
-2. Ensure the Python server is reachable from the device/emulator (use host machine IP instead of `127.0.0.1` on a physical device).
-3. Run the **app** configuration on a device or emulator.
+1. Open `android/` in Android Studio (JDK 21 / JBR 21).
+2. Start `server.py` on the host.
+3. Emulator: the app tries `10.0.2.2` then `127.0.0.1`. Physical device: `adb reverse tcp:5050 tcp:5050`, or set the host LAN IP under Settings.
 
 ---
 
-## Internship context
-
-- **Organization:** CyberPeace Foundation — Research Department  
-- **Period:** 8 June 2026 – 8 September 2026 (onsite through 10 July 2026)  
-- **Department:** Research Department  
-
-See `docs/project_plan.md` for early milestones. Add screenshots under `screenshots/` for report annexures.
-
----
-
-## License
-
-[Add license if required by your institution or mentor.]
+Internship period: 8 June 2026 – 8 September 2026 (onsite through 10 July 2026).

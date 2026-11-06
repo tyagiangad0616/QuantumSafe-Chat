@@ -3,6 +3,15 @@ import struct
 
 
 HEADER_SIZE = 4
+MAX_PAYLOAD_BYTES = 1_048_576
+
+
+class PacketTooLarge(ValueError):
+    def __init__(self, length):
+        super().__init__(
+            f"Packet length {length} exceeds {MAX_PAYLOAD_BYTES} bytes"
+        )
+        self.length = length
 
 
 def create_packet(packet_type, payload):
@@ -20,6 +29,9 @@ def encode_packet(packet):
         [4-byte payload length][JSON payload]
     """
     payload = json.dumps(packet).encode("utf-8")
+
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise PacketTooLarge(len(payload))
 
     header = struct.pack("!I", len(payload))
 
@@ -47,6 +59,9 @@ def receive_packet(sock):
 
     if payload_length <= 0:
         raise ValueError("Invalid packet length")
+
+    if payload_length > MAX_PAYLOAD_BYTES:
+        raise PacketTooLarge(payload_length)
 
     payload = _receive_exact(sock, payload_length)
 

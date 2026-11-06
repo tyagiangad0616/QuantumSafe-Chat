@@ -161,6 +161,7 @@ try:
         "✗ SECURITY FAILURE: "
         "Wrong session key decrypted the message!"
     )
+    raise SystemExit(1)
 
 except Exception:
 
