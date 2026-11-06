@@ -69,4 +69,4 @@ python3 test_protocol.py
 
 ---
 
-Internship period: 8 June 2026 – 8 September 2026 (onsite through 10 July 2026).
+
